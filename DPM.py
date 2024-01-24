@@ -190,10 +190,12 @@ class DockPlotManager(object):
     win=None
     area=None
     dockD=None
+    app = None
 
     def __init__(self, name='Dock window', defaultPlotKwargs = {}):
         self.state = None
         self.name=name
+        self.app = pg.mkQApp("DPM App")
         area=DockArea()
         win = pg.QtWidgets.QMainWindow()
         win.setCentralWidget(area)
@@ -349,7 +351,7 @@ class DockPlotManager(object):
 if __name__ =="__main__":
     #Run in ipython (probably with --pylab)
     from numpy import *
-    from PyQt5 import QtTest
+    from PyQt6 import QtTest
     x = linspace(0,1,1000)
     y = sin(2*pi*30*x)
     dpm = DockPlotManager("MyExperiment")

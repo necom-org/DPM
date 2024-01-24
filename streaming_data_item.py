@@ -9,10 +9,10 @@ def unpack_data(data):
             x = data['x']
             print(len(x))
         else:
-            x= np.arange(y.size)
+            x= np.arange(len(y))
     elif len(data) >=2:
         y = data
-        x= np.arange(y.size)
+        x= np.arange(len(y))
     else:
         x, y = data
     return x,y
@@ -93,6 +93,8 @@ class StreamingDataItem(pg.PlotDataItem):
         # Append it to the current data
 
     def addData(self, data):
+        if not len(data) or data is None:
+            return
         x,y =unpack_data(data)
         if self.mode == MODE_APPEND:
             self.appendData(x,y)
