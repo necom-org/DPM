@@ -65,10 +65,29 @@ def random_word():
     word_num = int(np.random.uniform()*len(random_word.words))
     return random_word.words[word_num]
 random_word.words = None
-
-
-
 penL = [pg.mkPen(s) for s in 'wrgbcmyk']
+
+try:
+    from qtconsole import inprocess
+except (ImportError, NameError):
+    print(
+        "This requires `qtconsole` to run. Install with `pip install qtconsole` or equivalent."
+    )
+
+
+class JupyterConsoleWidget(inprocess.QtInProcessRichJupyterWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.kernel_manager = inprocess.QtInProcessKernelManager()
+        self.kernel_manager.start_kernel()
+        self.kernel_client = self.kernel_manager.client()
+        self.kernel_client.start_channels()
+
+    def shutdown_kernel(self):
+        self.kernel_client.stop_channels()
+        self.kernel_manager.shutdown_kernel()
+
 
 class DockPlot(Dock):
     """ Container for a PlotWidget (in the future, perhaps multiple widgets. But only one for now.)
@@ -85,8 +104,8 @@ class DockPlot(Dock):
     * setReplaceMode(curves = 'all')
     """
     #curveD = None
-    def __init__(self, name,  curves={}, title=None, size=(200,200), defaultPlotKwargs={}):
-        super().__init__(name)#, size=size)
+    def __init__(self, name,  curves={}, title=None, size=(400,200), defaultPlotKwargs={}):
+        super().__init__(name, size=size)
         self.defaultPlotKwargs = defaultPlotKwargs
         self.dataD = defaultdict(list)
         if title is None:
@@ -171,7 +190,7 @@ class DockPlotManager(object):
     Tha idea is that you make a DPM, feed it data, and it will do an
     ok job of plotting that data and remembering your settings (chosen
     by mouse clicks). WIP.
-
+dpm
     Ultimately it should be a quick way of showing updating experiment data.;
 
     Use case:
@@ -196,9 +215,8 @@ class DockPlotManager(object):
         self.state = None
         self.name=name
         self.app = pg.mkQApp("DPM App")
-        area=DockArea()
+        area = DockArea()
         win = pg.QtWidgets.QMainWindow()
-        win.setCentralWidget(area)
         #win.resize(400,300)
         win.setWindowTitle(name)
         self.area=area
@@ -223,6 +241,18 @@ class DockPlotManager(object):
         #self.saveBtn=saveBtn
         #self.restoreBtn=restoreBtn
         #self.area.addDock(saveDock)
+
+        # create jupyter console widget (and  dock)
+        self.jupyter_console_widget = JupyterConsoleWidget()
+        self.jupyter_console_dock = Dock("Jupyter Console Dock", size=(1,1))
+        self.jupyter_console_dock.addWidget(self.jupyter_console_widget)
+        kernel = self.jupyter_console_widget.kernel_manager.kernel
+        kernel.shell.push(dict(np=np, dpm=self))
+        self.jpkernel = kernel
+        area.addDock(self.jupyter_console_dock, "bottom" )
+        win.setCentralWidget(area)
+
+
         self.win.show()
 
     def save(self):
@@ -273,7 +303,7 @@ class DockPlotManager(object):
     def updateCurve(self, curve):
         #data = (x,) if y is None else (x,y)
         if curve.category not in self.dockD:
-            self.addDOckPlot(name = curve.category, title = curve.category)
+            self.addDockPlot(name = curve.category, title = curve.category)
         self.dockD[curve.category].setData((curve.x, curve.y), name = curve.label)
 
     def addNewItem(self, data_name, data, dock_name):
