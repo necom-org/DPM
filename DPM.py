@@ -323,7 +323,7 @@ dpm
             dp = self.dockD[dock_name]
             newDI = dp.addNewItem(data_name, data)
             self.dataD[data_name].append(newDI)
-        print(f'{data_name}: {self.dataD[data_name]} after addNewItem')
+        #print(f'{data_name}: {self.dataD[data_name]} after addNewItem')
         return newDI
 
     #User interface below:
@@ -359,7 +359,7 @@ dpm
             dataItem = self.addNewItem(name, data, dock_name)
             #dataItems.append(dataItem)
         else: 
-            print(dataItems)
+            #print(dataItems)
             for dataItem in dataItems:
                 dataItem.addData(data)
 
