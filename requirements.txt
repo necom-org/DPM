@@ -1,0 +1,6 @@
+pyqtgraph
+pyqt6
+qtconsole
+zeromq
+numpy
+

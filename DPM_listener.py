@@ -1,77 +1,103 @@
-""" Little server that listens on a given port for sent trace data. The server simply sends them on to a DockPlotManager. It doesn't do any clever processing.
+""" DPM Listener: A server that listens for trace data via ZMQ and forwards it to DPM.
 """
-import zmq
+
 import pickle
-from DPM import DockPlotManager
+from typing import Any, Optional, Tuple, Union
+import zmq
 import pyqtgraph as pg
+from DPM import DockPlotManager
 
 PORT = 5561
-class DPMListener(object):
-    """A simple way of updating a DAM from other processes. Use DAMSender
-    from other processes to send data here."""
-    timer = None
-    def __init__(self, subName=b"default", dpm=None):
-        try:
-            subName = bytes(subName, "utf")
-        except TypeError:
-            pass
-        self.sock= zmq.Context().socket(zmq.SUB)
+
+class DPMListener:
+    """Listens for data sent by DPMSender and updates a DockPlotManager."""
+    
+    def __init__(
+        self, 
+        subName: Union[str, bytes] = b"default", 
+        dpm: Optional[DockPlotManager] = None, 
+        host: str = "localhost",
+        port: int = PORT
+    ) -> None:
+        if isinstance(subName, str):
+            subName = subName.encode('utf-8')
+            
+        self.sock = zmq.Context().socket(zmq.SUB)
         self.sock.set_hwm(10)
-        self.sock.connect("tcp://localhost:%s" % PORT)
-        self.sock.setsockopt(zmq.SUBSCRIBE, b"%s" % subName )
-        if dpm is None:
-            dpm =DockPlotManager(name=str(subName))
-        self.dpm = dpm
-        if 0:
-            rawPltL=[]
-            for col in range(3):
-                for row in range(3):
-                    rawPltL.append(gwRaw.addPlot(col=col, row=row))
-            self.rawPltL=rawPltL
-            subPltL=[]
-            for col in range(2):
-                for row in range(2):
-                    subPltL.append(gwRaw.addPlot(col=col, row=row))
-            self.gwRaw=gwRaw
-            self.gwSub=gwSub
+        self.sock.connect(f"tcp://{host}:{port}")
+        self.sock.setsockopt(zmq.SUBSCRIBE, subName)
+        
+        self.dpm = dpm or DockPlotManager(name=subName.decode('utf-8'))
+        self.timer: Optional[pg.QtCore.QTimer] = None
 
     @staticmethod
-    def parse_topic(topic_st):
+    def parse_topic(topic_bytes: bytes) -> Tuple[bytes, Optional[bytes]]:
+        """Parses a ZMQ topic into (label, category)."""
         category = None
-        splt = topic_st.split(b":")
-        label = splt.pop()
-        if splt:
-            category = splt.pop()
-        if splt:
-            print("extra data in topic: '{}' is left".format(splt))
+        parts = topic_bytes.split(b":")
+        label = parts.pop()
+        if parts:
+            category = parts.pop()
         return label, category
-    def update(self):
-        if self.sock.poll(10):
-            topic,msg= self.sock.recv().split(b' ', 1)
-            label, category = self.parse_topic(topic)
-            data = pickle.loads(msg)
-            print(label,category)
-            print(data)
-            #self.dpm.input_data()
-            #self.dpm.updateFromDict(D)
-            #print("{} updated".format(topic))
-        else:
-            print("Nothing recieved")
-            return None
 
-    def startUpdating(self, interval):
+    def update(self) -> Optional[bool]:
+        """Polls for new data and updates the DPM."""
+        if self.sock.poll(10):
+            try:
+                topic, msg = self.sock.recv().split(b' ', 1)
+                label, category = self.parse_topic(topic)
+                data = pickle.loads(msg)
+                
+                # Convert bytes to string for DPM methods
+                label_str = label.decode('utf-8') if isinstance(label, bytes) else label
+                category_str = category.decode('utf-8') if isinstance(category, bytes) else category
+                
+                plot_data = (data['coords'], data['data']) if data.get('coords') is not None else data['data']
+                
+                # Expose and forward data to DPM
+                self.dpm.add_data(label_str, plot_data, dock_name=category_str)
+                
+                # Extract and dynamically apply append/replace mode
+                mode = data.get('mode')
+                if mode is None and data.get('type') == 'points':
+                    mode = 'append'
+                
+                max_samples = data.get('max_samples')
+                if mode is not None or max_samples is not None:
+                    items = self.dpm.all_data_items.get(label_str)
+                    if items:
+                        for item in items:
+                            if mode == 'append':
+                                item.setAppendMode(max_samples)
+                            elif mode == 'replace':
+                                item.setReplaceMode()
+                
+                return True
+            except Exception as e:
+                print(f"Error processing message: {e}")
+                return False
+        return None
+
+    def start_updating(self, interval: int = 100) -> None:
+        """Starts a QTimer to periodically call update()."""
         self.timer = pg.QtCore.QTimer()
         self.timer.timeout.connect(self.update)
         self.timer.start(interval)
 
-    def stop(self):
-        self.timer.stop()
-
-    def close(self):
-        self.sock.close()
+    def stop(self) -> None:
+        """Stops the update timer."""
         if self.timer:
             self.timer.stop()
 
+    def close(self) -> None:
+        """Closes the ZMQ socket and stops the timer."""
+        self.sock.close()
+        self.stop()
+
+
 if __name__ == "__main__":
     listener = DPMListener("myexperiment")
-    listener.startUpdating(100)
+    listener.start_updating(100)
+    # Start the Qt event loop
+    pg.mkQApp().exec()
+

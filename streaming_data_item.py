@@ -1,138 +1,140 @@
-import pyqtgraph as pg
-from collections.abc import Mapping
-import numpy as np
+""" StreamingDataItem: A specialized pyqtgraph PlotDataItem for live updates.
+"""
 
-def unpack_data(data):
+from collections.abc import Mapping
+from typing import Any, Tuple, Union
+
+import numpy as np
+import pyqtgraph as pg
+
+def is_collection(obj: Any) -> bool:
+    """Check if an object is a collection (list, tuple, or ndarray)."""
+    return isinstance(obj, (list, tuple, np.ndarray))
+
+def unpack_data(data: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """Unpacks data into (x, y) arrays for plotting."""
     if isinstance(data, Mapping):
-        y = data['y']
-        if 'x' in data:
-            x = data['x']
-            print(len(x))
+        y = np.atleast_1d(data['y'])
+        x = np.atleast_1d(data.get('x', np.arange(len(y))))
+    elif isinstance(data, (tuple, list)) and len(data) == 2:
+        # Distinguish (x, y) from a 2-element list/tuple [y1, y2]
+        if is_collection(data[0]) and is_collection(data[1]):
+            x, y = np.atleast_1d(data[0]), np.atleast_1d(data[1])
         else:
-            x= np.arange(len(y))
-    elif len(data) >=2:
-        y = data
-        x= np.arange(len(y))
+            y = np.atleast_1d(data)
+            x = np.arange(len(y))
     else:
-        x, y = data
-    return x,y
+        y = np.atleast_1d(data)
+        x = np.arange(len(y))
+    return x, y
 
 MODE_REPLACE = 0
 MODE_APPEND = 1
+
 class StreamingDataItem(pg.PlotDataItem):
-    """ A PlotDataitem with convenience methods to be updated on the fly.
-
-    This has attributes suited to live-streaming/updating data:
-
-        max_samples <= number of samples to remember when appending
-        max_curves <= number of curves to remember in replace mode
-        update_mode (= APPEND_MODE, REPLACE_MODE)
-
-    and methods:
-        setAppendMode(max_samples=None);
-        setReplaceMode(max_curves=None);
-        addData()
-
-    """
-    dx = 1
-    def __init__(self, *args, 
-            mode= MODE_REPLACE,
-            max_samples = 1000,
-            **kwargs):
+    """A PlotDataItem that supports real-time appending and replacing of data."""
+    
+    def __init__(self, *args: Any, mode: int = MODE_REPLACE, max_samples: int = 1000, **kwargs: Any) -> None:
         if 'cv_name' in kwargs:
-            name= kwargs.pop('cv_name')
-            print('cv_name: ', name)
+            name = kwargs.pop('cv_name')
             kwargs["name"] = name
         else:
             name = None
-        super().__init__(*args, **kwargs)
-        self.x = self.xData
-        self.y = self.yData
-        self.max_samples= max_samples
-        self.max_curves=3
-        self.mode = mode
-        self.cv_name=name
-
-    def setAppendMode(self, max_samples=None):
-        print('setting append for ', self.cv_name)
-        self.mode = MODE_APPEND
-        if max_samples is not None and max_samples > 1:
-            self.max_samples=max_samples
-
-    def setReplaceMode(self, max_curves=None):
-        print('set replace mode for ', self.cv_name)
-        self.mode == MODE_REPLACE
-        if max_curves is not None:
-            self.max_curves=max_curves
-
-    def replaceData(self, x,y, *args, **kwargs):
-        #work out x, y
-        #Save data to self.
-        super().setData(x,y, *args, **kwargs)
-        # could add extra curves here...
-        #pi =self.getHoldingPlotItem()
-    def removeThyself(self):
-        """remove myself from a plot I'm currently on"""
-        self.getHoldingPlotItem().removeItem(self)
-
-    def appendData(self, x,y=None):
-        dx = self.dx
-        if y is None:
-            y = x
-            x= self.x[-1] +dx+ np.arange(len(y))*dx
-        elif x is None:
-            x= self.x[-1] +dx+ np.arange(len(y))*dx
             
-        self.x = np.append(self.x, x)
-        self.y = np.append(self.y, y)
-        self.x = self.x[-self.max_samples:]
-        self.y = self.y[-self.max_samples:]
-        self.setData(self.x,self.y)
+        # Unpack data if provided as a single argument (e.g. (x, y) tuple from DPM)
+        if len(args) == 1:
+            x_init, y_init = unpack_data(args[0])
+            super().__init__(x_init, y_init, **kwargs)
+        else:
+            super().__init__(*args, **kwargs)
+        
+        self.mode = mode
+        self.max_samples = max_samples
+        self.cv_name = name
+        
+        # Initialize internal cache from PlotDataItem's data
+        if self.xData is not None:
+            self.x = np.atleast_1d(self.xData)
+            self.y = np.atleast_1d(self.yData)
+        else:
+            self.x = np.array([], dtype=float)
+            self.y = np.array([], dtype=float)
+            
+        self.psd_mode = False
+        self.nperseg = 256
 
-        # Do a little pre-processing on the data
-        # Append it to the current data
+    def setAppendMode(self, max_samples: Union[int, None] = None) -> None:
+        """Switches the curve to append mode."""
+        self.mode = MODE_APPEND
+        if max_samples is not None:
+            self.max_samples = max_samples
 
-    def addData(self, data):
-        if not len(data) or data is None:
+    def setReplaceMode(self) -> None:
+        """Switches the curve to replace mode (default)."""
+        self.mode = MODE_REPLACE
+
+    def addData(self, data: Any) -> None:
+        """Main interface to update the curve's data."""
+        if data is None:
             return
-        x,y =unpack_data(data)
+            
+        x_new, y_new = unpack_data(data)
+        
         if self.mode == MODE_APPEND:
-            self.appendData(x,y)
+            self._append_data(x_new, y_new)
         else:
-            self.replaceData(x,y)
+            self._replace_data(x_new, y_new)
 
-    def getHoldingPlotItem(self):
-        pltItem= self.parentItem().parentItem().parentItem()
-        if type(pltItem) is pg.PlotItem :
-            return pltItem
+    def _update_psd_view(self) -> None:
+        """Computes the Power Spectral Density (PSD) using scipy.signal.welch."""
+        if len(self.y) > 2:
+            try:
+                dxs = np.diff(self.x)
+                dt = np.mean(dxs) if len(dxs) > 0 else 1.0
+                fs = 1.0 / dt if dt > 0 else 1.0
+                
+                nperseg_actual = min(self.nperseg, len(self.y))
+                if nperseg_actual >= 2:
+                    from scipy.signal import welch
+                    f, Pxx = welch(self.y, fs=fs, nperseg=nperseg_actual)
+                    super().setData(f, Pxx)
+                    return
+            except Exception as e:
+                print(f"Error computing PSD in StreamingDataItem: {e}")
+        super().setData(self.x, self.y)
+
+    def _replace_data(self, x: np.ndarray, y: np.ndarray) -> None:
+        """Replaces the entire trace with new data."""
+        self.x, self.y = x, y
+        if self.psd_mode:
+            self._update_psd_view()
         else:
-            raise ValueError("It's not a plot item!")
-        #else return None
-    def _show(self):
-        pltWidget = pg.PlotWidget()
-        pltWidget.addItem(self)
-        win = pg.QtGui.QMainWindow()
-        win.setCentralWidget(pltWidget)
-        self.win = win
-        self.plotWidget = pltWidget
-        win.show()
+            self.setData(self.x, self.y)
 
+    def _append_data(self, x: np.ndarray, y: np.ndarray) -> None:
+        """Appends new data to the existing trace."""
+        # Use np.concatenate instead of np.append for better efficiency
+        self.x = np.concatenate((self.x, x))
+        self.y = np.concatenate((self.y, y))
+        
+        # Limit buffer size
+        if len(self.x) > self.max_samples:
+            self.x = self.x[-self.max_samples:]
+            self.y = self.y[-self.max_samples:]
+            
+        if self.psd_mode:
+            self._update_psd_view()
+        else:
+            self.setData(self.x, self.y)
 
-if __name__ == "__main__":
-    import time
-    import numpy as np
-    from numpy import pi
-    from PyQt5 import QtTest
-    k = 0
-    x = np.linspace(0,.5,3)+k*0.5
-    y = np.sin(2*pi*x)
-    sdi = StreamingDataItem(x,y, name="test_sdi")
-    sdi._show()
-    if 1:
-        for k in range(1,20):
-            x = np.linspace(0,.5,3)+k*0.5
-            y = np.sin(2*pi*x)
-            sdi.appendData(x,y)
-            #time.sleep(.3)
-            QtTest.QTest.qWait(100)
-        #sdi.addToPlot()
+    def get_holding_plot_item(self) -> Union[pg.PlotItem, None]:
+        """Finds the PlotItem that contains this data item."""
+        parent = self.parentItem()
+        while parent is not None:
+            if isinstance(parent, pg.PlotItem):
+                return parent
+            if hasattr(parent, 'plotItem'):
+                return parent.plotItem
+            parent = parent.parentItem()
+        return None
+

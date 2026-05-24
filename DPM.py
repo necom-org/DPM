@@ -1,84 +1,47 @@
-""" Evolution of DAM (Dock Area Manager)
+""" DPM: Dock Plot Manager
 
-The ultimate idea is that you feed it named data sources, and it will plot them in a sensible default way. 
-This default way can be modified by mouse clicks, and can be remembered by the program.
-
-Minimal example functionality... of how I want it to look.
-
-dpm = DockPlotManager("MyPlotManager")
-
-# Data is incoming...
-x = linspace(0,1,1000)
-y = sin(2*pi*x*5)
-y2 = sin(2*pi*x*5)*(x-0.5)
-y3 = (x-0.5)**2
-
-data1 = (x,y)
-dpm.input_data("curve1", data1) #The default set of plots
-
-data2 = (x,y2)
-dpm.input_data("set2:curve1", data2) #Another set called "set2"
-
-data3 = (x,y3)
-dpm.input_data("set2:curve2", data3)
-
-# After each input, the plot will be updated.
-# Many changes could be made to the display via mouse-clicks (or code)
-# As many of these as possible should be remembered after closing/reopening the plots.
-
-
-Another goal is for it to be easily updatable from remote data sources. 
-That said, this might be achieved fairly easily, by writing a thread the reads data from
-a ZMQ stream, does some option conversion, then plots it.
-e.g.
-dpm.addListener(sourceName, translationFunction =None, sinkName (?) )
-
-
-
-Need to add:  ??
-* an interface for turning on/off data streams
-* An option for plotting existing data streams in various ways.
-* a plot-level method for removing/pausing/adding streams
-* A data structure for keeping track of data streams and where they are being plotted (in order to pass it on)
+A tool for managing and visualizing live-streaming data using pyqtgraph docks.
 """
 
+import os
+import pickle
+from collections import defaultdict, namedtuple
+from collections.abc import Mapping
 
 import numpy as np
-import pickle
-from pyqtgraph.dockarea import *
 import pyqtgraph as pg
-import sys
-from time import sleep
-import time
-from collections.abc import Mapping
-from collections import namedtuple, defaultdict
-from streaming_data_item import StreamingDataItem
-import os
+from pyqtgraph.dockarea import Dock, DockArea
 
+from streaming_data_item import StreamingDataItem, MODE_APPEND, MODE_REPLACE, unpack_data
+
+# Named tuple for structured curve data
 Curve = namedtuple("Curve", ["x", "y", "label", "category"])
 
 def random_word():
+    """Returns a random word from the 'words' file."""
     if random_word.words is None:
-        dir_name =os.path.dirname(__file__) 
+        dir_name = os.path.dirname(__file__)
         fname = os.path.join(dir_name, 'words')
-        random_word.words = open(fname).readlines()
-    word_num = int(np.random.uniform()*len(random_word.words))
+        with open(fname) as f:
+            random_word.words = [line.strip() for line in f]
+    word_num = int(np.random.uniform() * len(random_word.words))
     return random_word.words[word_num]
+
 random_word.words = None
-penL = [pg.mkPen(s) for s in 'wrgbcmyk']
+
+# Default pens for plotting
+PEN_LIST = [pg.mkPen(s) for s in 'wrgbcmyk']
 
 try:
     from qtconsole import inprocess
-except (ImportError, NameError):
-    print(
-        "This requires `qtconsole` to run. Install with `pip install qtconsole` or equivalent."
-    )
+except ImportError:
+    print("This requires `qtconsole` to run. Install with `pip install qtconsole`.")
 
 
 class JupyterConsoleWidget(inprocess.QtInProcessRichJupyterWidget):
+    """Integrated Jupyter console for interactive data manipulation."""
     def __init__(self):
         super().__init__()
-
         self.kernel_manager = inprocess.QtInProcessKernelManager()
         self.kernel_manager.start_kernel()
         self.kernel_client = self.kernel_manager.client()
@@ -90,318 +53,456 @@ class JupyterConsoleWidget(inprocess.QtInProcessRichJupyterWidget):
 
 
 class DockPlot(Dock):
-    """ Container for a PlotWidget (in the future, perhaps multiple widgets. But only one for now.)
-
-    Methods:
-    * addCurve(name, data, *args) <- make a new curve
-    * updateCurve(name, data) <- pass on data to the relevant curve
-    * addData(name, data) <- main interface.
-    
-    Probably:
-    * setMaxCurves(curves = 'all')
-    * setMaxSamples(curves = 'all')
-    * setAppendMode(curves = 'all')
-    * setReplaceMode(curves = 'all')
-    """
-    #curveD = None
-    def __init__(self, name,  curves={}, title=None, size=(400,200), defaultPlotKwargs={}):
+    """Container for a pyqtgraph PlotWidget within a Dock, including toolbar controls."""
+    def __init__(self, name, curves=None, title=None, size=(400, 200), default_plot_kwargs=None):
         super().__init__(name, size=size)
-        self.defaultPlotKwargs = defaultPlotKwargs
-        self.dataD = defaultdict(list)
-        if title is None:
-            title=name
-        self.plotWidget = pg.PlotWidget(title=title)
-        self.plotItem =self.plotWidget.plotItem
-        self.addWidget(self.plotWidget);
-        self.plotItem.addLegend()
+        self.default_plot_kwargs = default_plot_kwargs or {}
+        self.data_items = {}  # Map of curve_name -> StreamingDataItem
+        
+        # Main layout container to host controls and plot
+        self.main_widget = pg.QtWidgets.QWidget()
+        self.main_layout = pg.QtWidgets.QVBoxLayout(self.main_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(2)
+        
+        # Toolbar layout
+        self.controls_layout = pg.QtWidgets.QHBoxLayout()
+        self.controls_layout.setContentsMargins(5, 2, 5, 2)
+        
+        # 1. PSD Toggle checkbox
+        self.psd_cb = pg.QtWidgets.QCheckBox("PSD View")
+        self.psd_cb.toggled.connect(self.toggle_psd)
+        self.controls_layout.addWidget(self.psd_cb)
+        
+        # 1b. Plot Mode combobox (Replace/Append)
+        self.controls_layout.addWidget(pg.QtWidgets.QLabel("Mode:"))
+        self.mode_combo = pg.QtWidgets.QComboBox()
+        self.mode_combo.addItems(["Replace", "Append"])
+        self.mode_combo.currentIndexChanged.connect(self.change_mode)
+        self.controls_layout.addWidget(self.mode_combo)
+        
+        # 2. nperseg window size spinbox
+        self.controls_layout.addWidget(pg.QtWidgets.QLabel("FFT Window (nperseg):"))
+        self.nperseg_sb = pg.QtWidgets.QSpinBox()
+        self.nperseg_sb.setRange(8, 65536)
+        self.nperseg_sb.setValue(256)
+        self.nperseg_sb.setSingleStep(64)
+        self.nperseg_sb.valueChanged.connect(self.change_nperseg)
+        self.controls_layout.addWidget(self.nperseg_sb)
+        
+        # 3. max_samples history spinbox
+        self.controls_layout.addWidget(pg.QtWidgets.QLabel("History (max_samples):"))
+        self.history_sb = pg.QtWidgets.QSpinBox()
+        self.history_sb.setRange(10, 1000000)
+        self.history_sb.setValue(1000)
+        self.history_sb.setSingleStep(100)
+        self.history_sb.valueChanged.connect(self.change_history)
+        self.controls_layout.addWidget(self.history_sb)
+        
+        self.controls_layout.addStretch()
+        self.main_layout.addLayout(self.controls_layout)
+        
+        # Plot widget
+        self.plot_widget = pg.PlotWidget(title=title or name)
+        self.plot_item = self.plot_widget.plotItem
+        self.main_layout.addWidget(self.plot_widget)
+        
+        self.addWidget(self.main_widget)
+        self.plot_item.addLegend()
+
         if curves:
-            for key, data in curves.items():
-                self.addNewItem(name=key, data=data)
+            for curve_name, data in curves.items():
+                self.add_new_item(curve_name, data)
 
-
-    def addNewItem(self, name, data):
-        pen = penL[0]
-        if self.dataD:
-            inUsePens = [di.opts['pen'] for di in self.dataD.values()] 
-            for pen in penL:
-                if pen not in inUsePens:
+    def add_new_item(self, name, data):
+        """Creates and adds a new StreamingDataItem to the plot."""
+        # Select a pen that isn't currently in use if possible
+        pen = PEN_LIST[0]
+        if self.data_items:
+            in_use_pens = [item.opts['pen'] for item in self.data_items.values()]
+            for p in PEN_LIST:
+                if p not in in_use_pens:
+                    pen = p
                     break
-        item = StreamingDataItem(data, cv_name=name, pen=pen, **self.defaultPlotKwargs)
-        self.dataD[name] = item
-        self.plotItem.addItem(item, name=name)
-        return item
-    def removeItem(self, name):
-        item = self.dataD.pop(name)
-        self.plotWidget.removeItem(item)
 
-    def addData(self, name, data):
-        if name not in self.dataD:
-            if name is None:  # choose a random word as a name
-                name = random_word()
-                #name = str(self.default_names[len(self.curveD)])
-            self.addNewItem(name, data)
+        item = StreamingDataItem(data, cv_name=name, pen=pen, **self.default_plot_kwargs)
+        
+        # Sync values from toolbar GUI controls
+        item.psd_mode = self.psd_cb.isChecked()
+        item.nperseg = self.nperseg_sb.value()
+        item.max_samples = self.history_sb.value()
+        
+        # Sync mode
+        if self.mode_combo.currentIndex() == 1:
+            item.setAppendMode(item.max_samples)
         else:
-            self.dataD[name].addData(data)
-    
-    def addCurve(self, name, data):
-        self.plotWidget
-        if isinstance(data,Mapping): #It's a dictionary, with elements {x,y,label}
-            x,y =data['x'], data['y']
-        else:
-            if len(data)==2:
-                #x=data[0], y=data[1]
-                x,y = data
-            else:
-                y = data[0]
-                x = np.arange(y.size)
-
-        if name is None:  # choose a number as a name, according to how many plots we have already
-            name = str(self.default_names[len(self.curveD)])
-        if name in self.curveD:
-            print("overwriting curve: {}".format(name))
-            self.plotWidget.removeItem(self.curveD[name])
-        #If plots are too big plot downsampled array
-        if y.size < 1000000:
-            plot_data_item = self.plotWidget.plot(x, y, name=name)
-        else:
-            plot_data_item = self.plotWidget.plot(x[0:-1:100], y[0:-1:100], name=name)
-        streaming_pdi = StreamingDataItem(plot_data_item, **self.defaultPlotKwargs)
-        self.curveD[name] = streaming_pdi
-
-    def setData(self, data, name=None):
-        if name is None:
-            name = next(iter(self.curveD)) # update the "first" item
-        self.curveD[name].setData(data)
-
-    def setAppendMode(self, max_samples=None):
-        for key,item in self.dataD.items():
-            print('setting append for curve {}'.format(key))
-            item.setAppendMode(max_samples)
-
-    def setReplaceMode(self):
-        for item in self.dataD:
             item.setReplaceMode()
+        
+        self.data_items[name] = item
+        self.plot_item.addItem(item, name=name)
+        
+        if item.psd_mode:
+            item._update_psd_view()
+        return item
 
-    #def setData(self, name, data):
-    #    self.plotWidget
+    def remove_item(self, name):
+        """Removes a curve by name."""
+        if name in self.data_items:
+            item = self.data_items.pop(name)
+            self.plot_widget.removeItem(item)
 
-class DockPlotManager(object):
-    """ A class to simply manage a pyqtgraph DockArea, with docks that contain easy-to-update plots..
-    Tha idea is that you make a DPM, feed it data, and it will do an
-    ok job of plotting that data and remembering your settings (chosen
-    by mouse clicks). WIP.
-dpm
-    Ultimately it should be a quick way of showing updating experiment data.;
+    def add_data(self, name, data):
+        """Updates an existing curve or creates a new one with the given data."""
+        if name not in self.data_items:
+            if name is None:
+                name = random_word()
+            self.add_new_item(name, data)
+        else:
+            self.data_items[name].addData(data)
 
-    Use case:
-    dpm = DockPlotManager("MyExperiment")
-    dpm.updateCurve("raw", (x,y), widgetName=None)
-    #If it doesn't already exist, the above will add a curve named "raw" to the database and add plot it in it's own window.
-    #If "widgetName" is specified, then the widget with that name will be updated with a curve called "raw". Else the widget will be created.
-    #TODO If the curve already exists, any plots that depend on it will be updated
+    def set_append_mode(self, max_samples=None):
+        """Sets all curves in this dock to append mode."""
+        for name, item in self.data_items.items():
+            item.setAppendMode(max_samples)
+            
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(1)  # Index 1 is Append
+        self.mode_combo.blockSignals(False)
+        
+        if max_samples is not None:
+            self.history_sb.blockSignals(True)
+            self.history_sb.setValue(max_samples)
+            self.history_sb.blockSignals(False)
 
-    #Alternatively:
-    dpm.updateFromDict(widgetName, {'trace1': y, 'trace2':y2})
-    #Will update several curves at once
+    def set_replace_mode(self):
+        """Sets all curves in this dock to replace mode."""
+        for item in self.data_items.values():
+            item.setReplaceMode()
+            
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(0)  # Index 0 is Replace
+        self.mode_combo.blockSignals(False)
+
+    def change_mode(self, index):
+        """Changes the plotting mode (Replace or Append) for all curves in the dock."""
+        if index == 1:  # Append
+            max_samples = self.history_sb.value()
+            for item in self.data_items.values():
+                item.setAppendMode(max_samples)
+        else:  # Replace
+            for item in self.data_items.values():
+                item.setReplaceMode()
+
+    def toggle_psd(self, checked):
+        """Toggles PSD view mode for all curves in the dock."""
+        for item in self.data_items.values():
+            item.psd_mode = checked
+            if checked:
+                item._update_psd_view()
+            else:
+                item.setData(item.x, item.y)
+
+    def change_nperseg(self, value):
+        """Updates the segment length for all curves in the dock."""
+        for item in self.data_items.values():
+            item.nperseg = value
+            if item.psd_mode:
+                item._update_psd_view()
+
+    def change_history(self, value):
+        """Updates the history maximum samples for all curves in the dock."""
+        for item in self.data_items.values():
+            item.max_samples = value
+            if len(item.x) > value:
+                item.x = item.x[-value:]
+                item.y = item.y[-value:]
+                if item.psd_mode:
+                    item._update_psd_view()
+                else:
+                    item.setData(item.x, item.y)
 
 
-    """
-    win=None
-    area=None
-    dockD=None
-    app = None
-
-    def __init__(self, name='Dock window', defaultPlotKwargs = {}):
-        self.state = None
-        self.name=name
+class DockPlotManager:
+    """Manages a collection of DockPlots and their layouts."""
+    def __init__(self, name='DPM Window', default_plot_kwargs=None):
+        self.name = name
+        self.default_plot_kwargs = default_plot_kwargs or {}
         self.app = pg.mkQApp("DPM App")
-        area = DockArea()
-        win = pg.QtWidgets.QMainWindow()
-        #win.resize(400,300)
-        win.setWindowTitle(name)
-        self.area=area
-        self.dockD={}
-        self.dataD = defaultdict(list)
-        self.win=win
-        self.defaultPlotKwargs= defaultPlotKwargs
-
-        #Save area
-        #saveDock=Dock("saveArea", size=(10,10))
-        #w1 = pg.LayoutWidget()
-        label = pg.QtWidgets.QLabel("""Save/restore state""")
-        saveBtn = pg.QtWidgets.QPushButton('Save state')
-        restoreBtn = pg.QtWidgets.QPushButton('Restore state')
-        restoreBtn.setEnabled(False)
-        #w1.addWidget(label, row=0, col=0)
-        #w1.addWidget(saveBtn, row=1, col=0)
-        #w1.addWidget(restoreBtn, row=2, col=0)
-        #saveDock.addWidget(w1)
-        #saveBtn.clicked.connect(self.save)
-        #restoreBtn.clicked.connect(self.load)
-        #self.saveBtn=saveBtn
-        #self.restoreBtn=restoreBtn
-        #self.area.addDock(saveDock)
-
-        # create jupyter console widget (and  dock)
-        self.jupyter_console_widget = JupyterConsoleWidget()
-        self.jupyter_console_dock = Dock("Jupyter Console Dock", size=(1,1))
-        self.jupyter_console_dock.addWidget(self.jupyter_console_widget)
-        kernel = self.jupyter_console_widget.kernel_manager.kernel
-        kernel.shell.push(dict(np=np, dpm=self))
-        self.jpkernel = kernel
-        area.addDock(self.jupyter_console_dock, "bottom" )
-        win.setCentralWidget(area)
-
-
+        
+        self.win = pg.QtWidgets.QMainWindow()
+        self.win.setWindowTitle(name)
+        
+        self.area = DockArea()
+        self.win.setCentralWidget(self.area)
+        
+        self.docks = {}  # dock_name -> DockPlot
+        self.all_data_items = defaultdict(list)  # curve_name -> list of StreamingDataItems
+        
+        self.save_file = f"dockManager_{self.name}.pkl"
+        self.filters = defaultdict(list)  # curve_name -> list of Callable filters
+        self._init_controls()
+        self._init_jupyter()
+        
+        # Automatically restore layout and states on startup if they exist
+        if os.path.exists(self.save_file):
+            self.load()
+            
         self.win.show()
 
-    def save(self):
-        self.state = self.area.saveState()
-        pickle.dump(self.state, open("dockManager_{}_{}.pkl".format(__name__, self.name), 'wb') )
-        self.restoreBtn.setEnabled(True)
-    def load(self):
-        try:
-            if self.state is None:
-                state=pickle.load(open("dockManager_{}_{}.pkl".format(__name__, self.name), 'rb') )
-                #state={k:v for k,v in state if k in self.dockD.keys()}
-            print(self.state)
-            self.area.restoreState(self.state, missing='ignore')
-        except Exception as e:
-            print(e.args[0])
-            raise(e)
-
-    def addDockPlot(self, name, curves=None, title=None, defaultPlotKwargs = {}):
-        dockPlot=DockPlot(name, curves=curves, title=title, defaultPlotKwargs=defaultPlotKwargs)
-        self.area.addDock(dockPlot)
-        self.dockD[name]=dockPlot
-        for name,item in dockPlot.dataD.items():
-            self.dataD[name].append(item)
-        return dockPlot
-    def getPlotItem(self, name):
-        return self.dockD[name].findChild(pg.PlotWidget).plotItem
-
-    @classmethod
-    def format_input(data):
-        """ Make input data into a standard format.
-
-        Mostly what we want is to end up with a "Curve": x, y, label, category
-
-        Possible inputs:
-        Mapping, e.g.: {"x":, "y":, "label":, "category"} (where anything except "y" is optiona)
-        Single array: y 
-        A tuple of two arrays: x, y
-
-        If elements are left out, a default target is assumed.
-        """
+    def _init_controls(self):
+        """Initializes the control dock for save/restore functionality."""
+        self.control_dock = Dock("Controls", size=(100, 100))
+        layout = pg.LayoutWidget()
         
-        #if isinstance(data, Mapping): #It's a dictionary, with elements {x,y,label}
+        self.save_btn = pg.QtWidgets.QPushButton('Save Layout')
+        self.restore_btn = pg.QtWidgets.QPushButton('Restore Layout')
+        self.restore_btn.setEnabled(os.path.exists(self.save_file))
+        
+        self.save_btn.clicked.connect(self.save)
+        self.restore_btn.clicked.connect(self.load)
+        
+        layout.addWidget(pg.QtWidgets.QLabel("Dock Management:"), row=0, col=0)
+        layout.addWidget(self.save_btn, row=1, col=0)
+        layout.addWidget(self.restore_btn, row=2, col=0)
+        self.control_dock.addWidget(layout)
+        self.area.addDock(self.control_dock, 'left')
 
+    def _init_jupyter(self):
+        """Initializes the integrated Jupyter console."""
+        self.jupyter_widget = JupyterConsoleWidget()
+        self.jupyter_dock = Dock("Console", size=(1, 1))
+        self.jupyter_dock.addWidget(self.jupyter_widget)
+        
+        # Expose useful objects to the console
+        kernel = self.jupyter_widget.kernel_manager.kernel
+        kernel.shell.push({'np': np, 'dpm': self, 'pg': pg})
+        
+        self.area.addDock(self.jupyter_dock, 'bottom')
 
-        pass
-
-    #def updateCurve(self, plot_name, curve_name, data):
-    def updateCurve(self, curve):
-        #data = (x,) if y is None else (x,y)
-        if curve.category not in self.dockD:
-            self.addDockPlot(name = curve.category, title = curve.category)
-        self.dockD[curve.category].setData((curve.x, curve.y), name = curve.label)
-
-    def addNewItem(self, data_name, data, dock_name):
-        """ Make a new dataItem from some data, and add it.
-        to a plot. If the named plot doesn't exist, we'll make that too.
-        """
-        if dock_name is None:
-            if len(self.dockD):
-                dock_name = list(self.dockD.keys())[0] #make it the first one
-            else:
-                dock_name = random_word()
-
-        if dock_name not in self.dockD: #The named dock d
-            dp= self.addDockPlot(dock_name, curves={data_name: data}, title=dock_name, defaultPlotKwargs = self.defaultPlotKwargs)
-            newDI = dp.dataD[data_name]
-        else:
-            dp = self.dockD[dock_name]
-            newDI = dp.addNewItem(data_name, data)
-            self.dataD[data_name].append(newDI)
-        #print(f'{data_name}: {self.dataD[data_name]} after addNewItem')
-        return newDI
-
-    #User interface below:
-    def input_data(self, data, name=None):
-        """ Recieve new data and do something sensible with it.
-
-        Ways to call input_data:
-        * input_data(data)
-        * input_data(data: DataArray)
-        * input_data(data: dict( can be turned into an xarray)
-        After this, it'll be an xarray.DataArray
-         
-        name can have parts to it (i.e. absorption:start, and absorption:end). By default, traces with the same 'category' (the first part) will be plotted on the same graph
-        """
-        #curveL = self.format_input(data)
-        if hasattr(data, 'shape'): #Make it an xarray
-            data = x.DataArray(data)
-        elif isinstance(data, Mapping): #It's a dictionary
-            if 'name' in data: # it's a full description
-                name = data['name']
-                
-                if not 'type' in dataD or dataD['type'] == 'curve':
-                    self.updateCurve(curve)
-        else:
-            print("Not sure what to do with type {}".format(dataD['type']))
-
-        if not data.name and not name:
-            data.name= random_word()
+    def save(self):
+        """Saves the current dock layout and plot states to a file."""
+        layout_state = self.area.saveState()
+        
+        # Capture metadata for all active docks and their curves
+        docks_meta = {}
+        for dock_name, dock in self.docks.items():
+            curves_meta = {}
+            for curve_name, item in dock.data_items.items():
+                curves_meta[curve_name] = {
+                    "mode": item.mode,
+                    "max_samples": item.max_samples,
+                    "x": item.x,
+                    "y": item.y,
+                    "psd_mode": item.psd_mode,
+                    "nperseg": item.nperseg
+                }
+            docks_meta[dock_name] = {
+                "psd_view": dock.psd_cb.isChecked(),
+                "nperseg": dock.nperseg_sb.value(),
+                "history_limit": dock.history_sb.value(),
+                "plot_mode": dock.mode_combo.currentIndex(),
+                "curves": curves_meta
+            }
             
-    def addData(self, name, data, dock_name=None):
-        dataItems = self.dataD[name]
-        if not dataItems: #not in the dict- put it in a new dock
-            dataItem = self.addNewItem(name, data, dock_name)
-            #dataItems.append(dataItem)
-        else: 
-            #print(dataItems)
-            for dataItem in dataItems:
-                dataItem.addData(data)
+        state = {
+            "layout": layout_state,
+            "docks": docks_meta
+        }
+        
+        with open(self.save_file, 'wb') as f:
+            pickle.dump(state, f)
+            
+        self.restore_btn.setEnabled(True)
+        print(f"Layout and plot states saved to {self.save_file}")
 
-    def updateFromDict(self, D):
-        """ Update/create plots from the dictionary D containing curves to be plotted
-        """
-        for plot_name, data in D.items():
-            if plot_name not in self.dockD:
-                self.addDockPlot(plot_name)
-            if isinstance(data, Mapping): #It's a dictionary, with elements {x,y,label}
-                for curve_name, dat in data:
-                    self.updateCurve(plot_name, *dat, curve_name)
+    def load(self):
+        """Loads and restores the dock layout and plot states from a file."""
+        if not os.path.exists(self.save_file):
+            print("No saved state found.")
+            return
+
+        try:
+            with open(self.save_file, 'rb') as f:
+                state = pickle.load(f)
+                
+            # If the state uses the new structured dictionary format
+            if isinstance(state, dict) and "layout" in state and "docks" in state:
+                # 1. First reconstruct any missing docks/curves and restore their curve states/modes
+                for dock_name, dock_meta in state["docks"].items():
+                    curves_data = {}
+                    for curve_name, curve_meta in dock_meta["curves"].items():
+                        # Extract saved x and y data arrays
+                        x = curve_meta.get("x", np.array([], dtype=float))
+                        y = curve_meta.get("y", np.array([], dtype=float))
+                        curves_data[curve_name] = (x, y)
+                    
+                    if dock_name not in self.docks:
+                        # Dynamically reconstruct the dock and its curves
+                        dp = self.add_dock_plot(dock_name, curves=curves_data)
+                    else:
+                        dp = self.docks[dock_name]
+                        # For existing docks, make sure any missing curves are added
+                        for curve_name, (x, y) in curves_data.items():
+                            if curve_name not in dp.data_items:
+                                new_item = dp.add_new_item(curve_name, (x, y))
+                                self.all_data_items[curve_name].append(new_item)
+                            else:
+                                dp.data_items[curve_name]._replace_data(x, y)
+                                
+                    # 2. Restore GUI control values
+                    dp.psd_cb.blockSignals(True)
+                    dp.psd_cb.setChecked(dock_meta.get("psd_view", False))
+                    dp.psd_cb.blockSignals(False)
+                    
+                    dp.nperseg_sb.blockSignals(True)
+                    dp.nperseg_sb.setValue(dock_meta.get("nperseg", 256))
+                    dp.nperseg_sb.blockSignals(False)
+                    
+                    dp.history_sb.blockSignals(True)
+                    dp.history_sb.setValue(dock_meta.get("history_limit", 1000))
+                    dp.history_sb.blockSignals(False)
+                    
+                    dp.mode_combo.blockSignals(True)
+                    dp.mode_combo.setCurrentIndex(dock_meta.get("plot_mode", 0))
+                    dp.mode_combo.blockSignals(False)
+                    
+                    # 3. Restore mode and max_samples for the reconstructed curves
+                    for curve_name, curve_meta in dock_meta["curves"].items():
+                        item = dp.data_items.get(curve_name)
+                        if item:
+                            # Use individual curve mode if present; fallback to dock plot_mode
+                            mode = curve_meta.get("mode")
+                            if mode is None:
+                                saved_plot_mode = dock_meta.get("plot_mode")
+                                if saved_plot_mode is not None:
+                                    mode = MODE_APPEND if saved_plot_mode == 1 else MODE_REPLACE
+                                else:
+                                    mode = MODE_REPLACE
+                                
+                            max_samples = curve_meta.get("max_samples", 1000)
+                            item.psd_mode = curve_meta.get("psd_mode", dock_meta.get("psd_view", False))
+                            item.nperseg = curve_meta.get("nperseg", dock_meta.get("nperseg", 256))
+                            item.max_samples = max_samples
+                            
+                            if mode == MODE_APPEND:
+                                item.setAppendMode(max_samples)
+                            else:
+                                item.setReplaceMode()
+                                
+                            if item.psd_mode:
+                                item._update_psd_view()
+                            else:
+                                item.setData(item.x, item.y)
+                                
+                # 4. Restore the panel geometry layout
+                self.area.restoreState(state["layout"], missing='ignore')
             else:
-                if len(data)>2: # If so, we'll assume it's a single array, not x,y
-                    data = (data,)
-                self.updateCurve(plot_name, *data)
+                # Legacy fallback to restoring layout structure directly
+                self.area.restoreState(state, missing='ignore')
+                
+            print("Layout and plots restored.")
+        except Exception as e:
+            print(f"Error restoring state: {e}")
+
+    def add_filter(self, curve_name, func):
+        """Appends a callable filter function to the filter chain of a curve."""
+        self.filters[curve_name].append(func)
+
+    def clear_filters(self, curve_name=None):
+        """Clears registered filters for a curve (or all curves if curve_name is None)."""
+        if curve_name is not None:
+            if curve_name in self.filters:
+                self.filters[curve_name] = []
+        else:
+            self.filters.clear()
+
+    def add_dock_plot(self, name, curves=None, title=None, **kwargs):
+        """Creates and adds a new DockPlot to the manager."""
+        plot_kwargs = self.default_plot_kwargs.copy()
+        plot_kwargs.update(kwargs)
+        
+        dp = DockPlot(name, curves=curves, title=title, default_plot_kwargs=plot_kwargs)
+        self.area.addDock(dp)
+        self.docks[name] = dp
+        
+        for curve_name, item in dp.data_items.items():
+            self.all_data_items[curve_name].append(item)
+        return dp
+
+    def add_data(self, curve_name, data, dock_name=None):
+        """Adds data to a curve, creating the curve and dock if necessary."""
+        # Unpack coordinates
+        x_unpacked, y_unpacked = unpack_data(data)
+        
+        # Apply any registered curve-specific filters in sequence
+        if curve_name in self.filters:
+            for filter_func in self.filters[curve_name]:
+                try:
+                    x_unpacked, y_unpacked = filter_func(x_unpacked, y_unpacked)
+                except Exception as e:
+                    print(f"Error in filter '{getattr(filter_func, '__name__', 'unknown')}' for curve '{curve_name}': {e}")
+                    
+        data = (x_unpacked, y_unpacked)
+        
+        items = self.all_data_items.get(curve_name)
+        
+        if not items:
+            # Create a new dock if it doesn't exist
+            if dock_name is None:
+                dock_name = list(self.docks.keys())[0] if self.docks else random_word()
+            
+            if dock_name not in self.docks:
+                dp = self.add_dock_plot(dock_name, curves={curve_name: data})
+            else:
+                dp = self.docks[dock_name]
+                new_item = dp.add_new_item(curve_name, data)
+                self.all_data_items[curve_name].append(new_item)
+        else:
+            for item in items:
+                item.addData(data)
+
+    def get_plot_item(self, dock_name):
+        """Returns the pyqtgraph PlotItem for the specified dock."""
+        if dock_name in self.docks:
+            return self.docks[dock_name].plot_item
+        return None
 
 
-if __name__ =="__main__":
-    #Run in ipython (probably with --pylab)
-    from numpy import *
+if __name__ == "__main__":
+    # Example usage for interactive testing
+    import numpy as np
     from PyQt6 import QtTest
-    x = linspace(0,1,1000)
-    y = sin(2*pi*30*x)
-    dpm = DockPlotManager("MyExperiment")
-    dpm.addDockPlot("dp_one", curves={"cv_one":{'x':x,'y':y}, "cv_two":{'x':x**2, 'y':y} }, title="first dp")
-    if 1:
-        #dpm.addDockPlot("dp_two", curves={"cv_three":(x,exp(x)), "cv_four":(x**2, x) }, title="second dp")
-        dpm.addDockPlot("dp_two", curves={"cv_three":np.array((x,exp(x))).T, "cv_four":{'x':x**2, 'y':x} }, title="second dp")
+    
+    x = np.linspace(0, 1, 1000)
+    y = np.sin(2 * np.pi * 30 * x)
+    
+    dpm = DockPlotManager("Interactive Demo")
+    
+    # Add a dock with two curves
+    dpm.add_dock_plot(
+        "Waveforms", 
+        curves={
+            "Sine": (x, y), 
+            "Squared": (x**2, y)
+        }, 
+        title="Frequency Demo"
+    )
+    
+    # Add another dock with different data types
+    dpm.add_dock_plot(
+        "Exp", 
+        curves={
+            "Exponential": (x, np.exp(x)), 
+            "Linear": (x**2, x)
+        }
+    )
 
-        x2 = linspace(1,2,100)
-        #dpm.addData("cv_three", (x2, 2*sin(2*pi*x2)))
-        #dpm.updateCurve("test", "one", (x,y**2))
-        #dpm.updateFromDict({'raw' : (x, y)})
+    # Set one dock to append mode
+    dpm.docks['Exp'].set_append_mode(max_samples=100)
 
-        dpm.dockD['dp_two'].setAppendMode( max_samples=100)
-
-        for k in range(1,4):
-            x = np.linspace(0,.5,5)+k*0.5
-            y = np.sin(2*pi*x)
-            dpm.addData("cv_four", (x, y))
-            QtTest.QTest.qWait(300)
-
-
-
+    # Simulate incoming data
+    for k in range(1, 10):
+        x_chunk = np.linspace(0, 0.1, 5) + k * 0.1
+        y_chunk = np.sin(2 * np.pi * x_chunk)
+        dpm.add_data("Linear", (x_chunk, y_chunk))
+        QtTest.QTest.qWait(200)
