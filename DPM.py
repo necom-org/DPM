@@ -250,22 +250,18 @@ class DockPlotManager:
         self.win.show()
 
     def _init_controls(self):
-        """Initializes the control dock for save/restore functionality."""
-        self.control_dock = Dock("Controls", size=(100, 100))
-        layout = pg.LayoutWidget()
+        """Initializes the window menu bar for save/restore layout functionality."""
+        self.menu_bar = self.win.menuBar()
+        self.layout_menu = self.menu_bar.addMenu("&Layout")
         
-        self.save_btn = pg.QtWidgets.QPushButton('Save Layout')
-        self.restore_btn = pg.QtWidgets.QPushButton('Restore Layout')
-        self.restore_btn.setEnabled(os.path.exists(self.save_file))
+        self.save_action = self.layout_menu.addAction("&Save Layout")
+        self.save_action.setShortcut("Ctrl+S")
+        self.save_action.triggered.connect(self.save)
         
-        self.save_btn.clicked.connect(self.save)
-        self.restore_btn.clicked.connect(self.load)
-        
-        layout.addWidget(pg.QtWidgets.QLabel("Dock Management:"), row=0, col=0)
-        layout.addWidget(self.save_btn, row=1, col=0)
-        layout.addWidget(self.restore_btn, row=2, col=0)
-        self.control_dock.addWidget(layout)
-        self.area.addDock(self.control_dock, 'left')
+        self.restore_action = self.layout_menu.addAction("&Restore Layout")
+        self.restore_action.setShortcut("Ctrl+R")
+        self.restore_action.triggered.connect(self.load)
+        self.restore_action.setEnabled(os.path.exists(self.save_file))
 
     def _init_jupyter(self):
         """Initializes the integrated Jupyter console."""
@@ -312,7 +308,7 @@ class DockPlotManager:
         with open(self.save_file, 'wb') as f:
             pickle.dump(state, f)
             
-        self.restore_btn.setEnabled(True)
+        self.restore_action.setEnabled(True)
         print(f"Layout and plot states saved to {self.save_file}")
 
     def load(self):

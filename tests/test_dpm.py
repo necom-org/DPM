@@ -61,7 +61,7 @@ def test_save_restore(dpm):
     dpm.add_dock_plot("dock1")
     dpm.save()
     assert os.path.exists(dpm.save_file)
-    assert dpm.restore_btn.isEnabled()
+    assert dpm.restore_action.isEnabled()
     
     # Modify state
     dpm.load()
