@@ -278,6 +278,7 @@ class DockPlotManager:
         
         # Expose useful objects to the console
         kernel = self.jupyter_widget.kernel_manager.kernel
+        self.jpkernel = kernel
         kernel.shell.push({'np': np, 'dpm': self, 'pg': pg})
         
         self.area.addDock(self.jupyter_dock, 'bottom')
