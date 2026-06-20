@@ -85,6 +85,9 @@ class StreamingDataItem(pg.PlotDataItem):
         else:
             self._replace_data(x_new, y_new)
 
+    add_data = addData
+
+
     def _update_psd_view(self) -> None:
         """Computes the Power Spectral Density (PSD) using scipy.signal.welch."""
         if len(self.y) > 2:

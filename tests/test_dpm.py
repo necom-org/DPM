@@ -252,3 +252,21 @@ def test_default_plot_kwargs_compatibility():
     dock = manager.add_dock_plot("CamelCaseDock", defaultPlotKwargs={"pen": "g"})
     assert dock.default_plot_kwargs == {"pen": "g"}
 
+
+def test_addData_alias_compatibility(dpm):
+    # Test DockPlotManager.addData
+    dpm.addData("curve1", np.array([1, 2, 3]), dock_name="dock1")
+    assert "curve1" in dpm.all_data_items
+    item = dpm.all_data_items["curve1"][0]
+    assert np.array_equal(item.yData, [1, 2, 3])
+    
+    # Test DockPlot.addData
+    dock = dpm.docks["dock1"]
+    dock.addData("curve1", np.array([4, 5, 6]))
+    assert np.array_equal(item.yData, [4, 5, 6])
+    
+    # Test StreamingDataItem.add_data
+    item.add_data(np.array([7, 8, 9]))
+    assert np.array_equal(item.yData, [7, 8, 9])
+
+

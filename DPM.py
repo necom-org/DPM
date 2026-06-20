@@ -162,6 +162,9 @@ class DockPlot(Dock):
         else:
             self.data_items[name].addData(data)
 
+    addData = add_data
+
+
     def set_append_mode(self, max_samples=None):
         """Sets all curves in this dock to append mode."""
         for name, item in self.data_items.items():
@@ -470,6 +473,8 @@ class DockPlotManager:
         else:
             for item in items:
                 item.addData(data)
+
+    addData = add_data
 
     def get_plot_item(self, dock_name):
         """Returns the pyqtgraph PlotItem for the specified dock."""
