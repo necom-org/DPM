@@ -116,6 +116,11 @@ class DockPlot(Dock):
             for curve_name, data in curves.items():
                 self.add_new_item(curve_name, data)
 
+    @property
+    def dataD(self):
+        """Legacy alias for data_items."""
+        return self.data_items
+
     def add_new_item(self, name, data):
         """Creates and adds a new StreamingDataItem to the plot."""
         # Select a pen that isn't currently in use if possible
@@ -255,6 +260,16 @@ class DockPlotManager:
             self.load()
             
         self.win.show()
+
+    @property
+    def dataD(self):
+        """Legacy alias for all_data_items."""
+        return self.all_data_items
+
+    @property
+    def dockD(self):
+        """Legacy alias for docks."""
+        return self.docks
 
     def _init_controls(self):
         """Initializes the window menu bar for save/restore layout functionality."""

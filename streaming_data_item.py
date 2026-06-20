@@ -73,6 +73,12 @@ class StreamingDataItem(pg.PlotDataItem):
         """Switches the curve to replace mode (default)."""
         self.mode = MODE_REPLACE
 
+    def clear(self) -> None:
+        """Clears the cached data and the display."""
+        self.x = np.array([], dtype=float)
+        self.y = np.array([], dtype=float)
+        super().clear()
+
     def addData(self, data: Any) -> None:
         """Main interface to update the curve's data."""
         if data is None:

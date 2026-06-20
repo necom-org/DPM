@@ -69,3 +69,14 @@ def test_sdi_set_modes(qt_app):
     
     item.setReplaceMode()
     assert item.mode == MODE_REPLACE
+
+def test_sdi_clear(qt_app):
+    item = StreamingDataItem(mode=MODE_APPEND)
+    item.addData(np.array([1, 2, 3]))
+    assert len(item.x) == 3
+    assert len(item.y) == 3
+    
+    item.clear()
+    assert len(item.x) == 0
+    assert len(item.y) == 0
+
