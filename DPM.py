@@ -54,9 +54,11 @@ class JupyterConsoleWidget(inprocess.QtInProcessRichJupyterWidget):
 
 class DockPlot(Dock):
     """Container for a pyqtgraph PlotWidget within a Dock, including toolbar controls."""
-    def __init__(self, name, curves=None, title=None, size=(400, 200), default_plot_kwargs=None):
+    def __init__(self, name, curves=None, title=None, size=(400, 200), default_plot_kwargs=None, defaultPlotKwargs=None):
         super().__init__(name, size=size)
-        self.default_plot_kwargs = default_plot_kwargs or {}
+        # Support both snake_case and camelCase parameters for backward/external compatibility
+        plot_kwargs = default_plot_kwargs if default_plot_kwargs is not None else defaultPlotKwargs
+        self.default_plot_kwargs = plot_kwargs or {}
         self.data_items = {}  # Map of curve_name -> StreamingDataItem
         
         # Main layout container to host controls and plot
@@ -224,9 +226,11 @@ class DockPlot(Dock):
 
 class DockPlotManager:
     """Manages a collection of DockPlots and their layouts."""
-    def __init__(self, name='DPM Window', default_plot_kwargs=None):
+    def __init__(self, name='DPM Window', default_plot_kwargs=None, defaultPlotKwargs=None):
         self.name = name
-        self.default_plot_kwargs = default_plot_kwargs or {}
+        # Support both snake_case and camelCase parameters for backward/external compatibility
+        plot_kwargs = default_plot_kwargs if default_plot_kwargs is not None else defaultPlotKwargs
+        self.default_plot_kwargs = plot_kwargs or {}
         self.app = pg.mkQApp("DPM App")
         
         self.win = pg.QtWidgets.QMainWindow()
@@ -415,6 +419,16 @@ class DockPlotManager:
     def add_dock_plot(self, name, curves=None, title=None, **kwargs):
         """Creates and adds a new DockPlot to the manager."""
         plot_kwargs = self.default_plot_kwargs.copy()
+        
+        # Pop both spelling variants of default plot kwargs if passed as dicts
+        default_plot_kwargs = kwargs.pop('default_plot_kwargs', None)
+        default_plot_kwargs_camel = kwargs.pop('defaultPlotKwargs', None)
+        passed_dict = default_plot_kwargs if default_plot_kwargs is not None else default_plot_kwargs_camel
+        
+        if passed_dict is not None:
+            plot_kwargs.update(passed_dict)
+            
+        # Update with any other plot keyword arguments (like pen, symbol, etc.)
         plot_kwargs.update(kwargs)
         
         dp = DockPlot(name, curves=curves, title=title, default_plot_kwargs=plot_kwargs)

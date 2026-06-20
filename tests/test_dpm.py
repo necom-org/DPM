@@ -242,3 +242,13 @@ def test_realtime_preprocessing_filters(dpm):
     assert "virtual_ch" in dpm.docks["dock1"].data_items
     v_item = dpm.docks["dock1"].data_items["virtual_ch"]
     assert np.array_equal(v_item.y, [50.0, 100.0])
+
+def test_default_plot_kwargs_compatibility():
+    # Instantiate with camelCase parameter name
+    manager = DockPlotManager("CamelCaseTest", defaultPlotKwargs={"pen": "r"})
+    assert manager.default_plot_kwargs == {"pen": "r"}
+    
+    # Check that add_dock_plot also passes it down
+    dock = manager.add_dock_plot("CamelCaseDock", defaultPlotKwargs={"pen": "g"})
+    assert dock.default_plot_kwargs == {"pen": "g"}
+
